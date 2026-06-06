@@ -95,13 +95,33 @@ class RFDetector:
         return True
 
 
+# ---------------------------------------------------------------------------
+# Augmented patch datasets
+# ---------------------------------------------------------------------------
+
+def _augment(img: np.ndarray, mask: np.ndarray):
+    """Random flips + 90° rotations applied identically to image and mask."""
+    k = np.random.randint(0, 4)
+    img = np.rot90(img, k)
+    mask = np.rot90(mask, k)
+    if np.random.random() > 0.5:
+        img = np.fliplr(img)
+        mask = np.fliplr(mask)
+    if np.random.random() > 0.5:
+        img = np.flipud(img)
+        mask = np.flipud(mask)
+    return np.ascontiguousarray(img), np.ascontiguousarray(mask)
+
+
 class PatchDataset(Dataset):
-    def __init__(self, g_clahe, expert_mask, fov_bin, crop_size=256, num_crops=50):
+    def __init__(self, g_clahe, expert_mask, fov_bin, crop_size=256, num_crops=50,
+                 augment=True):
         self.g_clahe = g_clahe
         self.expert_mask = (expert_mask > 127).astype(np.uint8)
         self.fov_bin = fov_bin
         self.crop_size = crop_size
         self.num_crops = num_crops
+        self.augment = augment
 
     def __len__(self):
         return self.num_crops
@@ -110,13 +130,20 @@ class PatchDataset(Dataset):
         h, w = self.g_clahe.shape
         cs = self.crop_size
 
-        for _ in range(50):
+        for _ in range(100):
             y = np.random.randint(0, max(1, h - cs))
             x = np.random.randint(0, max(1, w - cs))
-            crop_img = self.g_clahe[y : y + cs, x : x + cs]
-            crop_mask = self.expert_mask[y : y + cs, x : x + cs]
-            if np.mean(crop_img > 0) > 0.3:
+            crop_img = self.g_clahe[y: y + cs, x: x + cs]
+            crop_mask = self.expert_mask[y: y + cs, x: x + cs]
+            # Prefer patches that contain some FOV and some vessels
+            fov_crop = self.fov_bin[y: y + cs, x: x + cs] if self.fov_bin is not None else None
+            fov_ratio = np.mean(fov_crop > 127) if fov_crop is not None else 1.0
+            vessel_ratio = np.mean(crop_mask)
+            if fov_ratio > 0.3 and vessel_ratio > 0.01:
                 break
+
+        if self.augment:
+            crop_img, crop_mask = _augment(crop_img, crop_mask)
 
         crop_img = crop_img.astype(np.float32) / 255.0
         crop_mask = crop_mask.astype(np.float32)
@@ -125,11 +152,12 @@ class PatchDataset(Dataset):
 
 
 class MultiImageDataset(Dataset):
-    def __init__(self, images, masks, crop_size=256, crops_per_img=30):
+    def __init__(self, images, masks, crop_size=256, crops_per_img=30, augment=True):
         self.images = images
         self.masks = masks
         self.crop_size = crop_size
         self.crops_per_img = crops_per_img
+        self.augment = augment
 
     def __len__(self):
         return len(self.images) * self.crops_per_img
@@ -142,13 +170,16 @@ class MultiImageDataset(Dataset):
         h, w = img.shape
         cs = self.crop_size
 
-        for _ in range(50):
+        for _ in range(100):
             y = np.random.randint(0, max(1, h - cs))
             x = np.random.randint(0, max(1, w - cs))
-            crop_img = img[y : y + cs, x : x + cs]
-            crop_mask = mask[y : y + cs, x : x + cs]
-            if np.mean(crop_img > 0) > 0.3:
+            crop_img = img[y: y + cs, x: x + cs]
+            crop_mask = mask[y: y + cs, x: x + cs]
+            if np.mean(crop_img > 0) > 0.3 and np.mean(crop_mask) > 0.01:
                 break
+
+        if self.augment:
+            crop_img, crop_mask = _augment(crop_img, crop_mask)
 
         crop_img = crop_img.astype(np.float32) / 255.0
         crop_mask = crop_mask.astype(np.float32)
@@ -156,18 +187,81 @@ class MultiImageDataset(Dataset):
         return torch.tensor(crop_img).unsqueeze(0), torch.tensor(crop_mask).unsqueeze(0)
 
 
+# ---------------------------------------------------------------------------
+# U-Net detector
+# ---------------------------------------------------------------------------
+
 class UNetDetector:
     def __init__(self, preprocessor=None):
         self.preprocessor = preprocessor or Preprocessor()
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model = MiniUNet().to(self.device)
 
-    def train_on_image(self, g_clahe, expert_mask, fov_bin, epochs=20, num_crops=40, batch_size=4,
-                       progress_callback=None):
-        dataset = PatchDataset(g_clahe, expert_mask, fov_bin, Config.UNET_CROP_SIZE, num_crops)
+    # ------------------------------------------------------------------
+    # Sliding-window inference
+    # ------------------------------------------------------------------
+
+    def _predict_sliding_window(self, img_norm: np.ndarray,
+                                patch_size: int = 256,
+                                stride: int = 128) -> np.ndarray:
+        """Run inference on overlapping patches and average probabilities.
+
+        This avoids border artefacts and gives substantially better results
+        on large images where the model was trained on 256×256 crops.
+        """
+        h, w = img_norm.shape
+
+        # Pad so the image is at least one patch large
+        pad_h = max(0, patch_size - h)
+        pad_w = max(0, patch_size - w)
+        if pad_h > 0 or pad_w > 0:
+            img_norm = np.pad(img_norm, ((0, pad_h), (0, pad_w)), mode="reflect")
+
+        H, W = img_norm.shape
+        prob_map = np.zeros((H, W), dtype=np.float32)
+        count_map = np.zeros((H, W), dtype=np.float32)
+
+        # Build grid of top-left corners
+        ys = list(range(0, H - patch_size + 1, stride))
+        xs = list(range(0, W - patch_size + 1, stride))
+        # Always include the last position so we cover the full image
+        if not ys or ys[-1] + patch_size < H:
+            ys.append(max(0, H - patch_size))
+        if not xs or xs[-1] + patch_size < W:
+            xs.append(max(0, W - patch_size))
+
+        self.model.eval()
+        with torch.no_grad():
+            for y in ys:
+                for x in xs:
+                    patch = img_norm[y: y + patch_size, x: x + patch_size]
+                    tensor = (
+                        torch.tensor(patch, dtype=torch.float32)
+                        .unsqueeze(0)
+                        .unsqueeze(0)
+                        .to(self.device)
+                    )
+                    pred = self.model(tensor).squeeze().cpu().numpy()
+                    prob_map[y: y + patch_size, x: x + patch_size] += pred
+                    count_map[y: y + patch_size, x: x + patch_size] += 1.0
+
+        count_map = np.maximum(count_map, 1.0)
+        prob_map /= count_map
+        return prob_map[:h, :w]
+
+    # ------------------------------------------------------------------
+    # Training helpers
+    # ------------------------------------------------------------------
+
+    def train_on_image(self, g_clahe, expert_mask, fov_bin, epochs=20, num_crops=40,
+                       batch_size=4, progress_callback=None):
+        dataset = PatchDataset(g_clahe, expert_mask, fov_bin,
+                               Config.UNET_CROP_SIZE, num_crops, augment=True)
         dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
-        optimizer = torch.optim.Adam(self.model.parameters(), lr=Config.UNET_LR)
+        optimizer = torch.optim.Adam(self.model.parameters(), lr=Config.UNET_LR,
+                                     weight_decay=1e-5)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
         criterion = BCEDiceLoss()
 
         for epoch in range(epochs):
@@ -188,16 +282,20 @@ class UNetDetector:
                 epoch_loss += loss.item()
                 n_batches += 1
 
+            scheduler.step()
             avg_loss = epoch_loss / max(n_batches, 1)
 
             if progress_callback:
                 progress_callback(epoch, epochs, avg_loss)
 
     def train_on_dataset(self, images, masks, epochs=20, crops_per_img=30, batch_size=8):
-        dataset = MultiImageDataset(images, masks, Config.UNET_CROP_SIZE, crops_per_img)
+        dataset = MultiImageDataset(images, masks, Config.UNET_CROP_SIZE,
+                                    crops_per_img, augment=True)
         dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
-        optimizer = torch.optim.Adam(self.model.parameters(), lr=Config.UNET_LR)
+        optimizer = torch.optim.Adam(self.model.parameters(), lr=Config.UNET_LR,
+                                     weight_decay=1e-5)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
         criterion = BCEDiceLoss()
 
         for epoch in range(epochs):
@@ -218,11 +316,27 @@ class UNetDetector:
                 epoch_loss += loss.item()
                 n_batches += 1
 
+            scheduler.step()
             avg_loss = epoch_loss / max(n_batches, 1)
-            print(f"Epoch {epoch + 1:02d}/{epochs:02d} | Loss: {avg_loss:.4f}")
+            print(f"Epoch {epoch + 1:02d}/{epochs:02d} | Loss: {avg_loss:.4f} "
+                  f"| LR: {scheduler.get_last_lr()[0]:.6f}")
 
-    def predict(self, img_rgb, fov_mask, threshold=None):
+    # ------------------------------------------------------------------
+    # Inference
+    # ------------------------------------------------------------------
+
+    def predict(self, img_rgb, fov_mask, threshold=None,
+                stride: int | None = None):
+        """Segment vessels using sliding-window inference.
+
+        Parameters
+        ----------
+        stride:
+            Step between overlapping patches (default: Config.UNET_STRIDE).
+            Smaller stride → more overlap → better quality but slower.
+        """
         threshold = threshold if threshold is not None else Config.DEFAULT_UNET_THRESHOLD
+        stride = stride if stride is not None else Config.UNET_STRIDE
 
         g_clahe = self.preprocessor.extract_green_clahe(img_rgb)
         fov_bin = self.preprocessor.binarize_fov(fov_mask)
@@ -234,14 +348,24 @@ class UNetDetector:
             fov_bin = np.ones_like(g_clahe) * 255
 
         img_norm = g_clahe_masked.astype(np.float32) / 255.0
-        tensor = torch.tensor(img_norm).unsqueeze(0).unsqueeze(0).to(self.device)
 
-        self.model.eval()
-        with torch.no_grad():
-            prob_map = self.model(tensor).squeeze().cpu().numpy()
+        # Sliding-window inference (much better than single-pass on large images)
+        prob_map = self._predict_sliding_window(img_norm,
+                                                patch_size=Config.UNET_CROP_SIZE,
+                                                stride=stride)
 
+        # Apply FOV mask to probability map
         prob_map *= (fov_bin > 127).astype(np.float32)
+
+        # Binary mask
         mask = (prob_map >= threshold).astype(np.uint8) * 255
+
+        # Post-processing: morphological opening removes salt noise,
+        # closing fills small gaps inside vessels
+        kernel_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel_open)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel_close)
 
         return mask, fov_bin, g_clahe, prob_map
 
@@ -254,5 +378,7 @@ class UNetDetector:
         path = path or Config.UNET_MODEL_PATH
         if not os.path.exists(path):
             return False
-        self.model.load_state_dict(torch.load(path, map_location=self.device, weights_only=True))
+        self.model.load_state_dict(
+            torch.load(path, map_location=self.device, weights_only=True)
+        )
         return True

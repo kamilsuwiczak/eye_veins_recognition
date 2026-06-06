@@ -24,6 +24,7 @@ class Config:
     UNET_BATCH_SIZE = 8
     UNET_EPOCHS = 20
     UNET_LR = 0.001
+    UNET_STRIDE = 128  # sliding-window step; smaller = better quality, slower
 
     TEST_IMAGES = ["04_g.jpg", "04_h.jpg", "04_dr.JPG", "05_g.jpg", "05_h.jpg"]
     TRAIN_PREFIXES = ["01", "02", "03"]

@@ -56,7 +56,7 @@ class Evaluator:
                 self._print_metrics("RF", m)
 
             if unet_loaded:
-                mask, fov_bin, _, _ = unet.predict(img, fov)
+                mask, fov_bin, _, _ = unet.predict(img, fov, stride=64)
                 gt_resized = self._resize_gt(gt, mask)
                 m = self.metrics.calculate(mask, gt_resized, fov_bin)
                 row["UNet"] = m

@@ -4,16 +4,19 @@ import torch.nn.functional as F
 
 
 class DoubleConv(nn.Module):
-    def __init__(self, in_channels, out_channels):
+    def __init__(self, in_channels, out_channels, dropout=0.0):
         super().__init__()
-        self.double_conv = nn.Sequential(
+        layers = [
             nn.Conv2d(in_channels, out_channels, 3, padding=1, bias=False),
             nn.BatchNorm2d(out_channels),
             nn.ReLU(inplace=True),
             nn.Conv2d(out_channels, out_channels, 3, padding=1, bias=False),
             nn.BatchNorm2d(out_channels),
             nn.ReLU(inplace=True),
-        )
+        ]
+        if dropout > 0:
+            layers.append(nn.Dropout2d(dropout))
+        self.double_conv = nn.Sequential(*layers)
 
     def forward(self, x):
         return self.double_conv(x)
@@ -22,19 +25,19 @@ class DoubleConv(nn.Module):
 class MiniUNet(nn.Module):
     def __init__(self, in_channels=1, out_channels=1):
         super().__init__()
-        self.inc = DoubleConv(in_channels, 16)
-        self.down1 = nn.Sequential(nn.MaxPool2d(2), DoubleConv(16, 32))
-        self.down2 = nn.Sequential(nn.MaxPool2d(2), DoubleConv(32, 64))
-        self.down3 = nn.Sequential(nn.MaxPool2d(2), DoubleConv(64, 128))
+        self.inc = DoubleConv(in_channels, 32)
+        self.down1 = nn.Sequential(nn.MaxPool2d(2), DoubleConv(32, 64))
+        self.down2 = nn.Sequential(nn.MaxPool2d(2), DoubleConv(64, 128))
+        self.down3 = nn.Sequential(nn.MaxPool2d(2), DoubleConv(128, 256, dropout=0.2))
 
-        self.up1 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
-        self.conv_up1 = DoubleConv(128, 64)
-        self.up2 = nn.ConvTranspose2d(64, 32, kernel_size=2, stride=2)
-        self.conv_up2 = DoubleConv(64, 32)
-        self.up3 = nn.ConvTranspose2d(32, 16, kernel_size=2, stride=2)
-        self.conv_up3 = DoubleConv(32, 16)
+        self.up1 = nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2)
+        self.conv_up1 = DoubleConv(256, 128)
+        self.up2 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
+        self.conv_up2 = DoubleConv(128, 64)
+        self.up3 = nn.ConvTranspose2d(64, 32, kernel_size=2, stride=2)
+        self.conv_up3 = DoubleConv(64, 32)
 
-        self.outc = nn.Conv2d(16, out_channels, kernel_size=1)
+        self.outc = nn.Conv2d(32, out_channels, kernel_size=1)
 
     def forward(self, x):
         h, w = x.shape[-2:]
@@ -69,18 +72,30 @@ class MiniUNet(nn.Module):
 
 
 class BCEDiceLoss(nn.Module):
-    def __init__(self, bce_weight=0.5):
+    """Combined weighted BCE + Dice loss.
+
+    vessel_weight: scalar > 1 penalises false-negatives more, boosting sensitivity.
+    """
+
+    def __init__(self, bce_weight: float = 0.4, vessel_weight: float = 4.0):
         super().__init__()
         self.bce_weight = bce_weight
-        self.bce = nn.BCELoss()
+        self.vessel_weight = vessel_weight
 
-    def forward(self, pred, target):
-        bce_loss = self.bce(pred, target)
+    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        # Weighted BCE – heavier penalty for missing vessels
+        bce_loss = -(
+            self.vessel_weight * target * torch.log(pred + 1e-8)
+            + (1.0 - target) * torch.log(1.0 - pred + 1e-8)
+        ).mean()
 
+        # Dice loss – good for imbalanced segmentation
         smooth = 1e-5
         pred_flat = pred.view(-1)
         target_flat = target.view(-1)
         intersection = (pred_flat * target_flat).sum()
-        dice_loss = 1.0 - (2.0 * intersection + smooth) / (pred_flat.sum() + target_flat.sum() + smooth)
+        dice_loss = 1.0 - (2.0 * intersection + smooth) / (
+            pred_flat.sum() + target_flat.sum() + smooth
+        )
 
         return self.bce_weight * bce_loss + (1.0 - self.bce_weight) * dice_loss

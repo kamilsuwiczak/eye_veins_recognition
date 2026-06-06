@@ -210,6 +210,12 @@ class App:
         test_file = st.sidebar.selectbox("Obraz testowy (U-Net):", self.image_files,
                                           index=min(3, len(self.image_files) - 1))
         unet_threshold = st.sidebar.slider("Próg binaryzacji U-Net", 0.0, 1.0, 0.5, 0.05)
+        unet_stride = st.sidebar.select_slider(
+            "Krok sliding window (px)",
+            options=[32, 64, 128, 256],
+            value=128,
+            help="Mniejszy krok = lepsza jakość, wolniejsze przetwarzanie",
+        )
 
         btn = "🚀 Trenuj i Testuj" if action == "Trenuj nowy model" else "🔍 Testuj"
 
@@ -254,12 +260,14 @@ class App:
         st.markdown("---")
         st.subheader(f"Predykcja: {test_file}")
 
-        with st.spinner("Przetwarzanie..."):
+        with st.spinner("Przetwarzanie (sliding window)..."):
             img_test, fov_test, gt_test = self._load_triplet(test_file)
             if img_test is None:
                 st.error("Nie udało się załadować obrazu testowego.")
                 return
-            mask, fov_bin, g_clahe, prob_map = detector.predict(img_test, fov_test, unet_threshold)
+            mask, fov_bin, g_clahe, prob_map = detector.predict(
+                img_test, fov_test, unet_threshold, stride=unet_stride
+            )
 
         c1, c2, c3 = st.columns(3)
         with c1:
