@@ -18,7 +18,7 @@ class App:
 
     def run(self):
         st.set_page_config(layout="wide")
-        st.title("👁️ Detekcja Naczyń Krwionośnych Dna Oka")
+        st.title("Detekcja Naczyń Krwionośnych Dna Oka")
 
         if not all(os.path.exists(d) for d in [Config.IMG_DIR, Config.FOV_DIR, Config.GT_DIR]):
             st.error(f"Upewnij się, że foldery danych istnieją!")
@@ -144,7 +144,7 @@ class App:
                                           index=1 if len(self.image_files) > 1 else 0)
 
         if action == "Trenuj i zapisz nowy" and train_file == test_file:
-            st.warning("⚠️ Ten sam obraz treningowy i testowy — ryzyko overfittingu.")
+            st.warning("Ten sam obraz treningowy i testowy — ryzyko overfittingu.")
 
         btn = "Uruchom Trening i Test" if action == "Trenuj i zapisz nowy" else "Uruchom Testowanie"
 
@@ -217,7 +217,7 @@ class App:
             help="Mniejszy krok = lepsza jakość, wolniejsze przetwarzanie",
         )
 
-        btn = "🚀 Trenuj i Testuj" if action == "Trenuj nowy model" else "🔍 Testuj"
+        btn = "Trenuj i Testuj" if action == "Trenuj nowy model" else "Testuj"
 
         if not st.sidebar.button(btn):
             return

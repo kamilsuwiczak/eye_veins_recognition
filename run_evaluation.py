@@ -25,11 +25,11 @@ class Evaluator:
 
         rf = RFDetector(self.preprocessor)
         rf_loaded = rf.load()
-        print(f"{'✅' if rf_loaded else '⚠️ '} Random Forest: {'wczytano' if rf_loaded else 'brak modelu'}")
+        print(f"Random Forest: {'wczytano' if rf_loaded else 'brak modelu'}")
 
         unet = UNetDetector(self.preprocessor)
         unet_loaded = unet.load()
-        print(f"{'✅' if unet_loaded else '⚠️ '} U-Net: {'wczytano' if unet_loaded else 'brak modelu'}")
+        print(f"U-Net: {'wczytano' if unet_loaded else 'brak modelu'}")
         print()
 
         for img_name in Config.TEST_IMAGES:
@@ -37,7 +37,7 @@ class Evaluator:
             img, fov, gt = self._load_triplet(img_name)
 
             if img is None or gt is None:
-                print("  ⚠️  Pominięto (brak pliku).")
+                print("Pominięto (brak pliku).")
                 continue
 
             row = {"image": img_name}
