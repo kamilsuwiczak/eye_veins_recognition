@@ -26,15 +26,31 @@ class Config:
     UNET_LR = 0.001
     UNET_STRIDE = 128  # sliding-window step; smaller = better quality, slower
 
-    TEST_IMAGES = ["04_g.jpg", "04_h.jpg", "04_dr.JPG", "05_g.jpg", "05_h.jpg"]
-    TRAIN_PREFIXES = ["01", "02", "03"]
+    TEST_IMAGES = [
+        "11_dr.JPG",
+        "11_g.jpg",
+        "11_h.jpg",
+        "12_dr.JPG",
+        "12_g.jpg",
+        "12_h.jpg",
+        "13_dr.JPG",
+        "13_g.jpg",
+        "13_h.jpg",
+        "14_dr.JPG",
+        "14_g.jpg",
+        "14_h.jpg",
+        "15_dr.JPG",
+        "15_g.jpg",
+        "15_h.jpg", ]
+    TRAIN_PREFIXES = ["01", "02", "03", "04", "05", "06", "07", "08", "09", "10"]
 
     @classmethod
     def get_image_files(cls):
         if not os.path.exists(cls.IMG_DIR):
             return []
         extensions = ('.png', '.jpg', '.jpeg', '.tif', '.tiff')
-        return sorted([f for f in os.listdir(cls.IMG_DIR) if f.lower().endswith(extensions)])
+        arr = [f for f in os.listdir(cls.IMG_DIR) if f.lower().endswith(extensions)]
+        return sorted([f for f in arr if f.split("_")[0] not in cls.TRAIN_PREFIXES])
 
     @classmethod
     def get_gt_path(cls, image_name):
