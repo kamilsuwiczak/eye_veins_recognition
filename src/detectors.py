@@ -94,11 +94,6 @@ class RFDetector:
         self.model = joblib.load(path)
         return True
 
-
-# ---------------------------------------------------------------------------
-# Augmented patch datasets
-# ---------------------------------------------------------------------------
-
 def _augment(img: np.ndarray, mask: np.ndarray):
     """Random flips + 90° rotations applied identically to image and mask."""
     k = np.random.randint(0, 4)
@@ -186,20 +181,11 @@ class MultiImageDataset(Dataset):
 
         return torch.tensor(crop_img).unsqueeze(0), torch.tensor(crop_mask).unsqueeze(0)
 
-
-# ---------------------------------------------------------------------------
-# U-Net detector
-# ---------------------------------------------------------------------------
-
 class UNetDetector:
     def __init__(self, preprocessor=None):
         self.preprocessor = preprocessor or Preprocessor()
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model = MiniUNet().to(self.device)
-
-    # ------------------------------------------------------------------
-    # Sliding-window inference
-    # ------------------------------------------------------------------
 
     def _predict_sliding_window(self, img_norm: np.ndarray,
                                 patch_size: int = 256,
@@ -248,10 +234,6 @@ class UNetDetector:
         count_map = np.maximum(count_map, 1.0)
         prob_map /= count_map
         return prob_map[:h, :w]
-
-    # ------------------------------------------------------------------
-    # Training helpers
-    # ------------------------------------------------------------------
 
     def train_on_image(self, g_clahe, expert_mask, fov_bin, epochs=20, num_crops=40,
                        batch_size=4, progress_callback=None):
@@ -320,10 +302,6 @@ class UNetDetector:
             avg_loss = epoch_loss / max(n_batches, 1)
             print(f"Epoch {epoch + 1:02d}/{epochs:02d} | Loss: {avg_loss:.4f} "
                   f"| LR: {scheduler.get_last_lr()[0]:.6f}")
-
-    # ------------------------------------------------------------------
-    # Inference
-    # ------------------------------------------------------------------
 
     def predict(self, img_rgb, fov_mask, threshold=None,
                 stride: int | None = None):
